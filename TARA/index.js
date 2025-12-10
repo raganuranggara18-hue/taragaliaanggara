@@ -1,430 +1,319 @@
 /**
- * Anak Perantara Bot (dengan mood, memory, reaksi, sticker, variasi 200+)
+ * Anak Perantara Bot (Fix untuk Railway)
+ * BOT siap pakai, lengkap dengan:
+ * - Mood
+ * - Memory 50 pesan
+ * - 200+ variasi template
+ * - Reaksi otomatis
+ * - Sticker otomatis
+ * - Anak kecil gaya ceria/manja/ngantuk/superhappy
+ * - Sistem role (Ayah & Mama)
+ * - Placeholder env menggunakan Bahasa Indonesia
  *
- * ENV yang wajib diset di Render / env:
- * - TELEGRAM_BOT_TOKEN    (contoh: 123456:ABCdef...)
- * - AYAH_ID               (contoh: 5547109522)
- * - MAMA_ID               (contoh: 1442119828)
- * - GEMINI_API_KEY        (optional placeholder: YOUR_NEW_PLACEHOLDER_KEY)
- * - STICKER_IDS           (optional, comma-separated Telegram sticker file_ids)
- * - PORT                  (opsional, default 3000)
+ * CARA MENGISI ENV DI RAILWAY:
  *
- * Catatan placeholder: saat mengisi environment variables di panel Render / hosting,
- * masukkan nilai tanpa tanda petik. Contoh:
- *   TELEGRAM_BOT_TOKEN = 123456:ABCdef...
+ * TELEGRAM_BOT_TOKEN = 123456:ABCdef   ← TANPA PETIK
+ * AYAH_ID = 5547109522                 ← TANPA PETIK
+ * MAMA_ID = 1442119828                 ← TANPA PETIK
+ * GEMINI_API_KEY = YOUR_NEW_KEY        ← TANPA PETIK
+ * STICKER_IDS = CAACAgUAA...,CAACAgIA... (boleh dikosongkan)
  *
- * Cara kerja singkat:
- * - Hanya AYAH_ID dan MAMA_ID yang diizinkan.
- * - Saat user belum memilih role, mereka harus pilih lewat /start (ketik "ayah" atau "mama").
- * - Ketika mengirim teks, bot membalas konfirmasi & menyampaikan pesan ke pasangan
- *   dalam "suara anak kecil" (menggunakan generator template + (opsional) Gemini).
- * - Mood memengaruhi nada/pilihan kata/emoji/sticker.
- * - Memory menyimpan N pesan terakhir per user.
+ * INGAT:
+ * Petik dua di placeholder hanya untuk contoh.
+ * Saat mengisi di Railway, JANGAN pakai petik apa pun.
  */
 
 import fs from "fs-extra";
-import express from "express";
 import axios from "axios";
+import express from "express";
 import TelegramBot from "node-telegram-bot-api";
 import dotenv from "dotenv";
 
 dotenv.config();
 
+// ====== LOAD ENV BENAR ======
+const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || "";
+const AYAH_ID = Number(process.env.AYAH_ID || 0);
+const MAMA_ID = Number(process.env.MAMA_ID || 0);
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY || "YOUR_NEW_PLACEHOLDER_KEY";
+
+// sticker opsional
+const STICKER_IDS = (process.env.STICKER_IDS || "")
+  .split(",")
+  .map(s => s.trim())
+  .filter(Boolean);
+
 const PORT = process.env.PORT || 3000;
-const BOT_TOKEN = process.env.8315912129:AAE7R4GoeEs77rNHaWYN-SLTytLzQjVEdQM || "";
-const AYAH_ID = Number(process.env.5547109522 || 0);
-const MAMA_ID = Number(process.env.1442119828 || 0);
-const GEMINI_API_KEY = process.env.AIzaSyDE6224M--QqEJ-5MgFWjGbrrGRMffaY_E || "YOUR_NEW_PLACEHOLDER_KEY";
-const STICKER_IDS_RAW = process.env.STICKER_IDS || ""; // comma-separated
-const STICKER_IDS = STICKER_IDS_RAW.split(",").map(s => s.trim()).filter(Boolean);
 
 if (!BOT_TOKEN) {
-  console.error("ERROR: TELEGRAM_BOT_TOKEN belum diset. Set environment variable TELEGRAM_BOT_TOKEN.");
+  console.error("ERROR: TELEGRAM_BOT_TOKEN belum diisi.");
   process.exit(1);
 }
 if (!AYAH_ID || !MAMA_ID) {
-  console.error("ERROR: AYAH_ID atau MAMA_ID belum diset dengan benar.");
+  console.error("ERROR: AYAH_ID atau MAMA_ID belum benar.");
   process.exit(1);
 }
 
 const TELEGRAM_API = `https://api.telegram.org/bot${BOT_TOKEN}`;
+
+// ====== SESSION FILE ======
 const SESSION_FILE = "./sessions.json";
 await fs.ensureFile(SESSION_FILE);
 let sessions = {};
 try {
-  sessions = await fs.readJson(SESSION_FILE);
-} catch (e) {
+  sessions = await fs.readJSON(SESSION_FILE);
+} catch {
   sessions = {};
 }
-
-// Memory for messages per user (persisted)
-const MEMORY_LIMIT = 50; // simpan maksimal 50 pesan terakhir per user
-
-if (!sessions.users) sessions.users = {}; // struktur: users[userId] = { role, mood, history:[] }
+if (!sessions.users) sessions.users = {};
 
 function saveSessions() {
-  return fs.writeJson(SESSION_FILE, sessions, { spaces: 2 });
+  return fs.writeJSON(SESSION_FILE, sessions, { spaces: 2 });
 }
 
-function isAuthorized(userId) {
-  return userId === AYAH_ID || userId === MAMA_ID;
+// ====== UTIL ======
+function isAuthorized(id) {
+  return id === AYAH_ID || id === MAMA_ID;
 }
-
-function getOther(userId) {
-  if (userId === AYAH_ID) return MAMA_ID;
-  if (userId === MAMA_ID) return AYAH_ID;
-  return null;
+function getOther(id) {
+  return id === AYAH_ID ? MAMA_ID : id === MAMA_ID ? AYAH_ID : null;
 }
-
 function pick(arr) {
   return arr[Math.floor(Math.random() * arr.length)];
 }
-
-// ----- MOOD SYSTEM -----
-const MOODS = ["ceria", "manja", "ngantuk", "superhappy"];
-// default mood when user sets role
-function defaultMood() {
-  return "ceria";
+function sanitize(t) {
+  return t?.trim().slice(0, 500) || "";
 }
 
-// mood impact: suffix, emoji, word-replacements per mood
+// ====== MOOD ======
+const MOODS = ["ceria", "manja", "ngantuk", "superhappy"];
 const MOOD_CONFIG = {
-  "ceria": {
+  ceria: {
     emojis: ["😊","😄","🙂"],
     suffixes: ["ya~","hehe","uwu"],
     styleHint: "ceria dan riang"
   },
-  "manja": {
+  manja: {
     emojis: ["🥺","😘","🤍"],
     suffixes: ["yaa~","muah~","ciiiin~"],
     styleHint: "manja dan manis"
   },
-  "ngantuk": {
+  ngantuk: {
     emojis: ["😴","😪","🫠"],
     suffixes: ["ngantuk~","mimpi yuk...","(ngu~)"],
     styleHint: "pelan dan ngantuk"
   },
-  "superhappy": {
+  superhappy: {
     emojis: ["🤩","🎉","💥"],
     suffixes: ["yaaayyy!!","yeay~","hore~"],
     styleHint: "sangat semangat"
   }
 };
+function defaultMood() {
+  return "ceria";
+}
 
-// ----- VARIATION GENERATOR (kombinatorial) -----
-// Arrays basis untuk kombinasi — dengan ukuran cukup besar untuk menghasilkan ratusan kombinasi.
+// ====== VARIASI TEMPLATE 200+ ======
 const PREFIXES = [
-  "Mama~","Papa~","Mamaa...","Heii~","Psst","Dengar ya,",
-  "Mama sayang,","Papa sayang,","Haii~","Halo halo,","Kok gitu sih,"
+  "Mama~","Papa~","Heii~","Halo halo~","Psst","Dengar ya,",
+  "Mama sayang,","Papa sayang,", "Mamaa...", "Papaa..."
 ];
-const INTERJECTIONS = [
-  "aku denger nih,","dia bilang,","kata papa,","kata mama,","dia nulis:", "ada yang bilang:",
-  "katanya,","dia cuma bilang:", "dia bisik:", "dia ceritanya:"
+const INTERJ = [
+  "aku denger nih,", "dia bilang,", "katanya,", "dia bisik:",
+  "dia nulis:", "dia cerita:", "ada pesan nih:"
 ];
-const CUTE_PATTERNS = [
-  'aku bilang: "{t}"', '"{t}" katanya', 'dia bilang gini: "{t}"', 'pesannya: "{t}"',
-  'kata dia: "{t}"', 'dia nulis: "{t}"'
+const PATTERNS = [
+  'aku bilang: "{t}"',
+  '"{t}" katanya',
+  'dia bilang gini: "{t}"',
+  'pesannya: "{t}"',
+  '"{t}" itu pesannya',
+  '"{t}" dia titipin'
 ];
 const CLOSERS = [
-  "Mama ga kangen papa?", "Mama pasti kangen kan?", "Pulang ya nanti?", "Boleh dipeluk nggak?",
-  "Peluk ya~", "Jangan marah ya~", "Pulang cepet dong~", "Mama, papa kangen juga~"
+  "Mama ga kangen papa?",
+  "Mama pasti kangen kan?",
+  "Pulang ya nanti?",
+  "Peluk dong~",
+  "Jangan marah ya~",
+  "Papa kangen juga loh~"
 ];
-const CUTE_SUFFIXES = ["(uwu)","(>_<)","hehe","muach~","ngu~",":3","(ngek)","*peluk*"];
-
-// confirmation replies ke pengirim (banyak variasi)
+const CUTE_SUFFIX = ["uwu", "(>_<)", "hehe", "muach", ":3", "*peluk*"];
 const CONFIRMATIONS = [
-  "Oke, sudah aku sampaikan ke {target}!",
-  "Sip! Nanti aku bilang ke {target}, tenang ya~",
-  "Baik, aku katakan ke {target} sekarang juga hehe",
-  "Siap! Anak kecil sudah ngantar pesan ke {target}",
-  "Wokee! Aku kasih tahu {target} yaa~",
-  "Udah kuy bilang ke {target}, jangan sedih~",
-  "Hehe aku sampaikan ke {target} ya, pasti kangen!",
-  "Siap kak, nanti aku suapin pesannya ke {target}! (nunjuk-nunjuk)",
-  "Okee, aku bilangin ke {target} sekarang. Jangan lupa pake bantal ya~",
-  "Aku sudah beritahu {target}, semoga dia senyum ya!"
-];
-// plus tambah pool untuk menambah variasi programatik
-const EXTRA_CONFIRM_PHRASES = [
-  "Tenang~ aku yang urus", "Udah kukirim ya", "Nanti aku kabarin", "Sudah aku catat",
-  "Langsung kukabari", "Baiklah, dikirim sekarang", "Siap, ditunggu ya"
+  "Oke, sudah aku sampaikan ke {t}!",
+  "Sip! Aku bilang ke {t} ya~",
+  "Baik, nanti aku kasih tau {t} hehe",
+  "Sudah~ aku kirim ke {t} ya",
+  "Tenang, aku sampaikan ke {t}!"
 ];
 
-// ----- REACTIONS (emoji/sticker) berdasarkan keyword / mood -----
-const REACTION_KEYWORDS = {
-  "love": ["kangen","sayang","rindu","cinta"],
-  "angry": ["marah","kesal","ngambek"],
-  "happy": ["senang","happy","bahagia","seneng"],
-  "sorry": ["maaf","minta maaf"]
+// ====== REACTION ======
+const REACT_WORDS = {
+  love: ["kangen","sayang","rindu","cinta"],
+  angry: ["marah","kesal","ngambek"],
+  happy: ["senang","happy","bahagia"],
+  sorry: ["maaf"]
 };
-const REACTION_EMOJI = {
+const REACT_EMOJI = {
   love: ["🥰","😘","💕"],
   angry: ["😳","😬","🤭"],
   happy: ["😁","😆","🎈"],
   sorry: ["😢","🙏","🥺"]
 };
 
-// ----- UTIL: sanitize & shorten -----
-function sanitizeText(t) {
-  if (!t) return "";
-  return t.replace(/[\x00-\x09\x0B\x0C\x0E-\x1F]/g, "").trim().slice(0, 500);
-}
-
-// ----- GENERATE CHILD MESSAGE (template-based, combinatorial) -----
-function generateTemplateChildReply(originalText, mood = "ceria") {
+// ====== MESSAGE GENERATOR ======
+function generateChildTemplate(text, mood) {
   const p = pick(PREFIXES);
-  const i = pick(INTERJECTIONS);
-  const pattern = pick(CUTE_PATTERNS);
-  const closer = pick(CLOSERS);
-  const suffix = Math.random() < 0.35 ? (" " + pick(CUTE_SUFFIXES)) : "";
+  const i = pick(INTERJ);
+  const pat = pick(PATTERNS);
+  const c = pick(CLOSERS);
 
-  // mood influence
-  const moodCfg = MOOD_CONFIG[mood] || MOOD_CONFIG["ceria"];
-  const moodEmoji = pick(moodCfg.emojis);
-  const moodSuffix = pick(moodCfg.suffixes);
+  const moodCfg = MOOD_CONFIG[mood] || MOOD_CONFIG.ceria;
+  const mEmoji = pick(moodCfg.emojis);
+  const mSuf = pick(moodCfg.suffixes);
+  const cs = Math.random() < 0.3 ? pick(CUTE_SUFFIX) : "";
 
-  // small transforms to make text 'lebih anak kecil'
-  let t = originalText;
+  let t = text;
   t = t.replace(/\bkangen\b/gi, "kangen juga");
-  t = t.replace(/\bsayang\b/gi, "sayang banget");
   if (t.length > 120) t = t.slice(0, 117) + "...";
 
-  // combine
-  const candidateTemplates = [
-    `${p} ${i} ${pattern.replace("{t}", t)} — ${closer} ${moodEmoji} ${moodSuffix}${suffix}`,
-    `${p} ${i} "${t}" ${closer} ${moodEmoji}${suffix}`,
-    `${p} bilang "${t}". ${closer} ${moodEmoji} ${moodSuffix}${suffix}`,
-    `${i} dia bilang: "${t}" ${closer} ${moodEmoji}${suffix}`,
-    `${p} ${pattern.replace("{t}", t)} ${moodEmoji} ${moodSuffix}${suffix}`,
-    `${pattern.replace("{t}", t)} ${closer} ${moodEmoji}${suffix}`
-  ];
-
-  // occasionally add small cute interjection
-  let out = pick(candidateTemplates);
-  if (Math.random() < 0.18) out = out + " " + pick(["Hehe","Hihi","Awww~","Muach~"]);
-  return out.replace(/\s+/g, " ").trim();
+  return `${p} ${i} ${pat.replace("{t}", t)} — ${c} ${mEmoji} ${mSuf} ${cs}`;
 }
 
-// ----- GEMINI (placeholder) -----
-// Jika kamu mengisi GEMINI_API_KEY dengan key valid, fungsi ini bisa diganti
-// untuk memanggil API Gemini. Saat ini fallback ke template generator.
-async function generateWithGemini(originalText, mood = "ceria") {
+// dummy Gemini fallback
+async function generateGemini(text, mood) {
   if (!GEMINI_API_KEY || GEMINI_API_KEY === "YOUR_NEW_PLACEHOLDER_KEY") {
-    return generateTemplateChildReply(originalText, mood);
+    return generateChildTemplate(text, mood);
   }
 
-  // Placeholder: panggilan Gemini harus disesuaikan dengan dokumentasi terbaru.
-  // Sampel pseudo-code: (ganti endpoint & payload sesuai dokumentasi)
   try {
-    const prompt = `Kamu adalah anak kecil dengan mood: ${mood}. Ubah pesan berikut menjadi gaya anak kecil imut:\n\n"${originalText}"\n\nBuat 1 versi.`;
-    const resp = await axios.post(
+    const prompt = `Buat pesan anak kecil (imut, sesuai mood ${mood}): "${text}"`;
+    const r = await axios.post(
       `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateText?key=${GEMINI_API_KEY}`,
       { prompt: { text: prompt } }
     );
-    // sesuaikan parsing sesuai respons Gemini
-    const textOut = resp.data?.candidates?.[0]?.output_text;
-    if (textOut) return textOut;
-    return generateTemplateChildReply(originalText, mood);
-  } catch (err) {
-    console.error("Gemini error, fallback ke template:", err?.message || err);
-    return generateTemplateChildReply(originalText, mood);
+
+    const out = r.data?.candidates?.[0]?.output_text;
+    if (out) return out;
+
+    return generateChildTemplate(text, mood);
+  } catch {
+    return generateChildTemplate(text, mood);
   }
 }
 
-// ----- BUILDER KONFIRMASI KE PENGIRIM -----
-function buildConfirmationForSender(targetLabel) {
-  const t = pick(CONFIRMATIONS);
-  // targetLabel = "Mama" atau "Ayah"
-  return t.replace("{target}", targetLabel) + " " + pick(EXTRA_CONFIRM_PHRASES);
-}
-
-// ----- REACTION ENGINE: cek kata kunci, kirim emoji/sticker -----
-function detectReactionKeywords(text) {
-  const lower = text.toLowerCase();
-  for (const [k, arr] of Object.entries(REACTION_KEYWORDS)) {
-    for (const word of arr) {
-      if (lower.includes(word)) return k;
+// detect reaction
+function detectReaction(text) {
+  const low = text.toLowerCase();
+  for (const k in REACT_WORDS) {
+    for (const w of REACT_WORDS[k]) {
+      if (low.includes(w)) return k;
     }
   }
   return null;
 }
 
-// ----- SENDING HELPERS -----
-async function sendTelegramMessage(chatId, text, options = {}) {
-  // gunakan endpoint sendMessage via axios supaya bebas custom
-  try {
-    const payload = {
-      chat_id: chatId,
-      text
-    };
-    if (options.parse_mode) payload.parse_mode = options.parse_mode;
-    await axios.post(`${TELEGRAM_API}/sendMessage`, payload);
-  } catch (err) {
-    console.error("sendTelegramMessage error:", err?.response?.data || err.message);
-  }
+// send message
+async function sendMsg(id, text) {
+  await axios.post(`${TELEGRAM_API}/sendMessage`, {
+    chat_id: id,
+    text
+  });
+}
+async function sendSticker(id, sticker) {
+  await axios.post(`${TELEGRAM_API}/sendSticker`, {
+    chat_id: id,
+    sticker
+  });
 }
 
-async function sendSticker(chatId, stickerFileId) {
-  if (!stickerFileId) return;
-  try {
-    await axios.post(`${TELEGRAM_API}/sendSticker`, {
-      chat_id: chatId,
-      sticker: stickerFileId
-    });
-  } catch (err) {
-    console.error("sendSticker error:", err?.response?.data || err.message);
-  }
-}
-
-// ----- BOT SETUP (polling mode, aman untuk Render) -----
+// ====== BOT ======
 const bot = new TelegramBot(BOT_TOKEN, { polling: true });
 
-// /start handler to guide selection
 bot.onText(/\/start/, async (msg) => {
-  const fromId = msg.from.id;
-  if (!isAuthorized(fromId)) {
-    await bot.sendMessage(fromId, "Maaf, bot ini hanya untuk Ayah & Mama. Akses ditolak.");
-    return;
-  }
-  // reset role if wants to reselect
-  const keyboard = {
-    reply_markup: {
-      keyboard: [["Saya Ayah"], ["Saya Mama"], ["/status", "/mood"]],
-      one_time_keyboard: true,
-      resize_keyboard: true
-    }
-  };
-  await bot.sendMessage(fromId, "Halo! Pilih peranmu untuk sesi ini: ketik 'Saya Ayah' atau 'Saya Mama'.", keyboard);
+  const id = msg.from.id;
+  if (!isAuthorized(id)) return bot.sendMessage(id, "Akses ditolak.");
+
+  await bot.sendMessage(id,
+    "Halo! Pilih peranmu:\n- ketik: Saya Ayah\n- ketik: Saya Mama"
+  );
 });
 
-// /status to check role & mood
-bot.onText(/\/status/, async (msg) => {
-  const uid = msg.from.id;
-  if (!isAuthorized(uid)) {
-    await bot.sendMessage(uid, "Akses ditolak.");
-    return;
-  }
-  const u = sessions.users[uid] || {};
-  await bot.sendMessage(uid, `Statusmu: role=${u.role || "belum dipilih"}, mood=${u.mood || "belum diset"}`);
-});
-
-// /mood <moodname> untuk set mood manual
+// set mood
 bot.onText(/\/mood (.+)/, async (msg, match) => {
-  const uid = msg.from.id;
-  if (!isAuthorized(uid)) {
-    await bot.sendMessage(uid, "Akses ditolak.");
-    return;
-  }
-  const m = (match[1] || "").toLowerCase();
+  const id = msg.from.id;
+  if (!isAuthorized(id)) return;
+
+  const m = match[1].toLowerCase();
   if (!MOODS.includes(m)) {
-    await bot.sendMessage(uid, `Mood tidak dikenal. Pilih salah satu: ${MOODS.join(", ")}`);
-    return;
+    return bot.sendMessage(id, `Mood tidak valid. Pilih: ${MOODS.join(", ")}`);
   }
-  if (!sessions.users[uid]) sessions.users[uid] = {};
-  sessions.users[uid].mood = m;
+
+  sessions.users[id] = sessions.users[id] || {};
+  sessions.users[id].mood = m;
   await saveSessions();
-  await bot.sendMessage(uid, `Mood diubah menjadi: ${m}`);
+  bot.sendMessage(id, `Mood diubah ke: ${m}`);
 });
 
-// Pesan teks handler utama
+// pesan umum
 bot.on("message", async (msg) => {
-  // skip non-text or service messages
   if (!msg.text) return;
-  const uid = msg.from.id;
-  const text = msg.text.trim();
+  const id = msg.from.id;
+  const txt = msg.text.trim();
 
-  // ignore /start handled above
-  if (text.startsWith("/start") || text.startsWith("/mood") || text.startsWith("/status")) return;
-
-  if (!isAuthorized(uid)) {
-    await bot.sendMessage(uid, "Maaf, bot ini hanya untuk Ayah & Mama.");
-    return;
+  if (!isAuthorized(id)) {
+    return bot.sendMessage(id, "Bot ini hanya untuk Ayah & Mama.");
   }
 
-  // ensure user session exists
-  if (!sessions.users[uid] || !sessions.users[uid].role) {
-    // try to parse simple selection
-    const lower = text.toLowerCase();
-    if (["saya ayah", "ayah", "aku ayah"].includes(lower)) {
-      sessions.users[uid] = sessions.users[uid] || {};
-      sessions.users[uid].role = "ayah";
-      sessions.users[uid].mood = sessions.users[uid].mood || defaultMood();
-      sessions.users[uid].history = sessions.users[uid].history || [];
+  // assignment role
+  if (!sessions.users[id] || !sessions.users[id].role) {
+    const low = txt.toLowerCase();
+    if (["saya ayah","ayah"].includes(low)) {
+      sessions.users[id] = { role: "ayah", mood: defaultMood(), history: [] };
       await saveSessions();
-      await bot.sendMessage(uid, "Terdaftar sebagai Ayah. Sekarang kirim pesan, aku akan menyampaikan ya!");
-      return;
+      return bot.sendMessage(id, "Kamu Ayah. Kirim pesan kapan saja.");
     }
-    if (["saya mama", "mama", "aku mama"].includes(lower)) {
-      sessions.users[uid] = sessions.users[uid] || {};
-      sessions.users[uid].role = "mama";
-      sessions.users[uid].mood = sessions.users[uid].mood || defaultMood();
-      sessions.users[uid].history = sessions.users[uid].history || [];
+    if (["saya mama","mama"].includes(low)) {
+      sessions.users[id] = { role: "mama", mood: defaultMood(), history: [] };
       await saveSessions();
-      await bot.sendMessage(uid, "Terdaftar sebagai Mama. Sekarang kirim pesan, aku akan menyampaikan ya!");
-      return;
+      return bot.sendMessage(id, "Kamu Mama. Kirim pesan kapan saja.");
     }
-    await bot.sendMessage(uid, "Kamu belum pilih peran. Ketik 'Saya Ayah' atau 'Saya Mama', atau /start untuk panduan.");
-    return;
+    return bot.sendMessage(id, "Ketik 'Saya Ayah' atau 'Saya Mama'.");
   }
 
-  // user is authorized and has role
-  const userSession = sessions.users[uid];
-  userSession.history = userSession.history || [];
-  // push to memory (sender's perspective)
-  userSession.history.push({ text, at: Date.now() });
-  // trim history
-  if (userSession.history.length > MEMORY_LIMIT) userSession.history.splice(0, userSession.history.length - MEMORY_LIMIT);
+  // history
+  sessions.users[id].history.push({ text: txt, at: Date.now() });
+  if (sessions.users[id].history.length > 50)
+    sessions.users[id].history.shift();
   await saveSessions();
 
-  // decide mood (random small chance to change mood subtly)
-  if (!userSession.mood) userSession.mood = defaultMood();
-  if (Math.random() < 0.08) {
-    // random small mood drift
-    userSession.mood = pick(MOODS);
-    await saveSessions();
-  }
+  const role = sessions.users[id].role;
+  const mood = sessions.users[id].mood;
+  const targetLabel = role === "ayah" ? "Mama" : "Ayah";
+  const recipient = getOther(id);
 
-  // build confirmation for sender
-  const targetLabel = userSession.role === "ayah" ? "Mama" : "Ayah";
-  const confirmation = buildConfirmationForSender(targetLabel);
-  await bot.sendMessage(uid, confirmation);
+  // konfirmasi ke pengirim
+  await bot.sendMessage(id,
+    pick(CONFIRMATIONS).replace("{t}", targetLabel)
+  );
 
-  // detect reaction keywords
-  const reactionKey = detectReactionKeywords(text);
-  if (reactionKey) {
-    // send a reaction emoji to sender (fun)
-    const emoji = pick(REACTION_EMOJI[reactionKey]);
-    await bot.sendMessage(uid, `(${emoji})`);
-  }
+  // reaksi
+  const r = detectReaction(txt);
+  if (r) bot.sendMessage(id, pick(REACT_EMOJI[r]));
 
-  // build childlike message for recipient
-  const mood = userSession.mood;
-  const childText = await generateWithGemini(sanitizeText(text), mood);
+  // generate pesan anak
+  const child = await generateGemini(sanitize(txt), mood);
 
-  // store delivered message to recipient's memory
-  const recipientId = getOther(uid);
-  sessions.users[recipientId] = sessions.users[recipientId] || { history: [], mood: defaultMood() };
-  sessions.users[recipientId].history = sessions.users[recipientId].history || [];
-  sessions.users[recipientId].history.push({ from: uid, text: childText, at: Date.now() });
-  if (sessions.users[recipientId].history.length > MEMORY_LIMIT) sessions.users[recipientId].history.splice(0, sessions.users[recipientId].history.length - MEMORY_LIMIT);
-  await saveSessions();
-
-  // send optional sticker based on mood (random chance)
+  // sticker opsional
   if (STICKER_IDS.length > 0 && Math.random() < 0.35) {
-    const s = pick(STICKER_IDS);
-    await sendSticker(recipientId, s);
-    // slight delay so sticker appears before text
-    await new Promise(r => setTimeout(r, 400));
+    await sendSticker(recipient, pick(STICKER_IDS));
   }
 
-  // send child message to recipient
-  const delivered = `${childText}\n\n(— disampaikan oleh anak kecil yang imut)`;
-  await sendTelegramMessage(recipientId, delivered);
+  // kirim ke target
+  await sendMsg(recipient, child + "\n\n(— disampaikan anak kecil imut)");
 });
 
-// lightweight express health endpoint
+// express health check
 const app = express();
-app.get("/", (req, res) => res.send("Anak Perantara Bot aktif"));
-app.listen(PORT, () => {
-  console.log(`Server berjalan di port ${PORT}`);
-});
+app.get("/", (req, res) => res.send("Anak Perantara Bot aktif."));
+app.listen(PORT, () => console.log("Server berjalan di port", PORT));
