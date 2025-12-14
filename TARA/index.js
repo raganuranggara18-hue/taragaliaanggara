@@ -6,105 +6,98 @@ import dotenv from "dotenv";
 
 dotenv.config();
 
-const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || "";
-const AYAH_ID = Number(process.env.AYAH_ID || 0);
-const MAMA_ID = Number(process.env.MAMA_ID || 0);
+const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
+const AYAH_ID = Number(process.env.AYAH_ID);
+const MAMA_ID = Number(process.env.MAMA_ID);
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY || "";
-const STICKER_IDS = (process.env.STICKER_IDS || "")
-  .split(",")
-  .map(s => s.trim())
-  .filter(Boolean);
-
-const WEBHOOK_URL = process.env.WEBHOOK_URL || "";
+const WEBHOOK_URL = process.env.WEBHOOK_URL;
 const PORT = process.env.PORT || 3000;
 
-if (!BOT_TOKEN) throw new Error("TELEGRAM_BOT_TOKEN belum diisi");
-if (!AYAH_ID || !MAMA_ID) throw new Error("AYAH_ID / MAMA_ID salah");
-if (!WEBHOOK_URL) throw new Error("WEBHOOK_URL belum diisi");
+if (!BOT_TOKEN || !AYAH_ID || !MAMA_ID || !WEBHOOK_URL) {
+  throw new Error("ENV belum lengkap");
+}
 
-const TELEGRAM_API = `https://api.telegram.org/bot${BOT_TOKEN}`;
-
-// ===== SESSION =====
+/* ================= SESSION ================= */
 const SESSION_FILE = "./sessions.json";
 let sessions = { users: {} };
 
-async function loadSession() {
-  await fs.ensureFile(SESSION_FILE);
-  try {
-    sessions = await fs.readJSON(SESSION_FILE);
-  } catch {
-    sessions = { users: {} };
-  }
+await fs.ensureFile(SESSION_FILE);
+try {
+  sessions = await fs.readJSON(SESSION_FILE);
+} catch {
+  sessions = { users: {} };
 }
-async function saveSessions() {
-  await fs.writeJSON(SESSION_FILE, sessions, { spaces: 2 });
-}
-await loadSession();
 
-// ===== UTIL =====
+const saveSessions = () =>
+  fs.writeJSON(SESSION_FILE, sessions, { spaces: 2 });
+
+/* ================= UTIL ================= */
 const isAuthorized = id => id === AYAH_ID || id === MAMA_ID;
 const getOther = id => (id === AYAH_ID ? MAMA_ID : AYAH_ID);
-const pick = arr => arr[Math.floor(Math.random() * arr.length)];
 const sanitize = t => t?.trim().slice(0, 500) || "";
 
-// ===== MOOD =====
+/* ================= MOOD ================= */
 const MOODS = ["ceria", "manja", "ngantuk", "superhappy"];
 const MOOD_CONFIG = {
-  ceria: { emojis: ["😊","😄"], suffixes: ["ya~","hehe"] },
-  manja: { emojis: ["🥺","😘"], suffixes: ["yaa~","muah~"] },
-  ngantuk: { emojis: ["😴","😪"], suffixes: ["ngantuk~"] },
-  superhappy: { emojis: ["🤩","🎉"], suffixes: ["yaaayyy!!"] }
+  ceria: { emojis: ["😊","😄"] },
+  manja: { emojis: ["🥺","😘"] },
+  ngantuk: { emojis: ["😴","😪"] },
+  superhappy: { emojis: ["🤩","🎉"] }
 };
+
+const pick = arr => arr[Math.floor(Math.random() * arr.length)];
 const defaultMood = () => "ceria";
 
-// ===== TEMPLATE =====
-function generateChildTemplate(text, mood) {
-  const emoji = pick(MOOD_CONFIG[mood].emojis);
-  return `Mama/Papa~ dia bilang "${text}" ${emoji}`;
-}
-
-// ===== GEMINI =====
+/* ================= AI ================= */
 async function generateGemini(text, mood) {
-  if (!GEMINI_API_KEY) return generateChildTemplate(text, mood);
+  if (!GEMINI_API_KEY) {
+    return `Mama/Papa~ dia bilang "${text}" ${pick(MOOD_CONFIG[mood].emojis)}`;
+  }
+
   try {
     const r = await axios.post(
       `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateText?key=${GEMINI_API_KEY}`,
       { prompt: { text: `Anak kecil mood ${mood}: "${text}"` } }
     );
-    return r.data?.candidates?.[0]?.output_text || generateChildTemplate(text, mood);
+    return r.data?.candidates?.[0]?.output_text
+      || `Mama/Papa~ dia bilang "${text}"`;
   } catch {
-    return generateChildTemplate(text, mood);
+    return `Mama/Papa~ dia bilang "${text}"`;
   }
 }
 
-// ===== BOT =====
+/* ================= BOT ================= */
 const bot = new TelegramBot(BOT_TOKEN, { webHook: true });
 
 const app = express();
 app.use(express.json());
 
-app.post("/webhook", (req, res) => {
+const WEBHOOK_PATH = `/bot${BOT_TOKEN}`;
+
+app.post(WEBHOOK_PATH, (req, res) => {
   bot.processUpdate(req.body);
   res.sendStatus(200);
 });
 
-bot.setWebHook(`${WEBHOOK_URL}/webhook`);
+bot.setWebHook(`${WEBHOOK_URL}${WEBHOOK_PATH}`);
 
 bot.on("message", async msg => {
   if (!msg.text) return;
+
   const id = msg.from.id;
   if (!isAuthorized(id)) return;
 
   if (!sessions.users[id]) {
-    sessions.users[id] = { role: null, mood: defaultMood(), history: [] };
+    sessions.users[id] = { mood: defaultMood() };
     await saveSessions();
   }
 
-  const childMsg = await generateGemini(sanitize(msg.text), sessions.users[id].mood);
-  await axios.post(`${TELEGRAM_API}/sendMessage`, {
-    chat_id: getOther(id),
-    text: childMsg
-  });
+  const reply = await generateGemini(
+    sanitize(msg.text),
+    sessions.users[id].mood
+  );
+
+  await bot.sendMessage(getOther(id), reply);
 });
 
 app.get("/", (_, res) => res.send("Bot aktif"));
